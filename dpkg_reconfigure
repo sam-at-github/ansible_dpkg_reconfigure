@@ -1,0 +1,157 @@
+#!/usr/bin/python
+"""
+Ansible module to reconfigure a Debian package using dpkg-reconfigure. Uses "editor" input mode noninteractively.
+"""
+
+DOCUMENTATION = """
+---
+module: dpkg_reconfigure
+short_description: Reconfigure a Debian package.
+description:
+     - Reconfigure a Debian package using dpkg-reconfigure.
+version_added: "1.2"
+notes:
+    - A number of questions have to be answered (depending on the package).
+      Use 'DEBIAN_FRONTED=editor dpkg-reconfigure $pkg' for finding them.
+options:
+  pkg:
+    description:
+      - Package to configure.
+    required: true
+    default: null
+    aliases: []
+  conf_file:
+    description:
+      - File with <debconf-question>=<answer> pairs on each line.
+    required: true
+    default: null
+    aliases: []
+"""
+
+EXAMPLES = """
+"""
+
+import os
+import stat
+import tempfile
+import subprocess
+import atexit
+
+# This is the editor.
+script="""#!/bin/bash
+# Acts as an editor to allow non interactive dpkg-reconfigure. See README.md.
+#
+
+function fail() {
+  log "$@"; exit 1;
+}
+
+function log() {
+  [[ -n "$DEBUG" ]] && echo "$@"
+}
+
+[[ -n "$1" ]] || fail "No file to edit."
+[[ -f "$DEBCONF_FOR_EDITOR" ]] || fail "No debconf config file found in DEBCONF_FOR_EDITOR var"
+
+# Should only be one setting per call, but loop just in case.
+key_values=`egrep '^[^#]' $1`
+log "Found key_values '$key_values'"
+IFS=$'\n'
+for i in $key_values; do
+  k=`echo $i | egrep -o '^[^=]+'`
+  new_val=`egrep "^$k" $DEBCONF_FOR_EDITOR`
+  v=`echo $new_val | egrep -o '[^=]+$'`
+  
+  if [[ -n "$new_val" && -n "$v" ]]; then
+    v=`echo $v | sed -r 's/^"?|"?$/"/g'` # dpkg-reconfigure likes "".
+    log "Found matching new config. Setting '$k=$v'"
+    out="$out$k=$v\n"
+  elif [[ -z "$new_val" ]]; then
+    log "Key '$k' not found"
+  else
+    log "No value for key $k"
+  fi
+done
+[[ -n "$out" ]] && echo -e "$out" > $1
+"""
+script_path = 0
+
+
+def main():
+  result = {}
+  module = AnsibleModule(
+    argument_spec = dict(
+      pkg           = dict(required=True),
+      conf_file     = dict(required=True),
+    )
+  )
+  
+  try:
+    result = dpkg_reconfigure(module.params)
+  except(InternalException) as err:
+    module.fail_json(msg=err.msg)
+ 
+  module.exit_json(**result);
+  return 0
+  
+
+def dpkg_reconfigure(params):
+  global script_path
+  result = {}
+  
+  atexit.register(cleanup);
+  check_params(params);
+  pkg = params['pkg']
+  conf_file = params['conf_file']
+  
+  if check_changed(pkg, conf_file):
+    cmd_str = "DEBIAN_FRONTEND=editor EDITOR={editor} DEBCONF_FOR_EDITOR={conf_file} {dpkg} {pkg}"
+    script_path = output_script_file(script)
+    cmd = ["/bin/bash", "-c", cmd_str.format(
+      editor=script_path,
+      conf_file=conf_file,
+      dpkg="dpkg-reconfigure",
+      pkg=pkg
+    )]
+    result['cmd'] = cmd
+
+    try:
+      r = subprocess.check_output(cmd);
+      result['changed'] = True
+    except(CalledProcessError) as err:
+      raise InternalException(err.output)
+  
+  return result;
+
+
+def check_params(params):
+  if not os.path.isfile(params['conf_file']):
+    raise InternalException("No such file; conf_file '" + params['conf_file'] + "'")
+  if subprocess.call(["dpkg", "--status", params['pkg']], stdout=file("/dev/null", "w"), stderr=file("/dev/null", "w")):
+    raise InternalException("Package '" + params['pkg'] + "' is not installed.");
+
+
+def check_changed(pkg, conf_file):
+  return True
+  
+
+def output_script_file(script):
+  fd, path = tempfile.mkstemp()
+  f = os.fdopen(fd, "w");
+  os.fchmod(f.fileno(), stat.S_IRWXU|stat.S_IROTH|stat.S_IRGRP);
+  f.write(script);
+  f.close();
+  return path
+
+
+def cleanup():
+  if type(script_path).__name__ == 'str':
+    os.unlink(script_path)
+
+
+class InternalException (Exception):
+  def __init__(self, msg):
+    self.msg = msg
+
+from ansible.module_utils.basic import *
+main();
