@@ -20,7 +20,7 @@ options:
     required: true
     default: null
     aliases: []
-  conf_file:
+  answers_file:
     description:
       - File with <debconf-question>=<answer> pairs on each line.
     required: true
@@ -37,9 +37,9 @@ import tempfile
 import subprocess
 import atexit
 
-# This is the editor.
+# This is the editor!
 script="""#!/bin/bash
-# Acts as an editor to allow non interactive dpkg-reconfigure. See README.md.
+# Acts as an editor to allow non interactive dpkg-reconfigure.
 #
 
 function fail() {
@@ -61,7 +61,7 @@ for i in $key_values; do
   k=`echo $i | egrep -o '^[^=]+'`
   new_val=`egrep "^$k" $DEBCONF_FOR_EDITOR`
   v=`echo $new_val | egrep -o '[^=]+$'`
-  
+
   if [[ -n "$new_val" && -n "$v" ]]; then
     v=`echo $v | sed -r 's/^"?|"?$/"/g'` # dpkg-reconfigure likes "".
     log "Found matching new config. Setting '$k=$v'"
@@ -82,58 +82,62 @@ def main():
   module = AnsibleModule(
     argument_spec = dict(
       pkg           = dict(required=True),
-      conf_file     = dict(required=True),
+      answers_file     = dict(required=True),
     )
   )
-  
+
   try:
     result = dpkg_reconfigure(module.params)
   except(InternalException) as err:
     module.fail_json(msg=err.msg)
- 
+
   module.exit_json(**result);
   return 0
-  
+
 
 def dpkg_reconfigure(params):
   global script_path
   result = {}
-  
+
   atexit.register(cleanup);
   check_params(params);
   pkg = params['pkg']
-  conf_file = params['conf_file']
-  
-  if check_changed(pkg, conf_file):
-    cmd_str = "DEBIAN_FRONTEND=editor EDITOR={editor} DEBCONF_FOR_EDITOR={conf_file} {dpkg} {pkg}"
+  answers_file = params['answers_file']
+
+  if check_changed(pkg, answers_file):
+    cmd_str = "DEBIAN_FRONTEND=editor EDITOR={editor} DEBCONF_FOR_EDITOR={answers_file} {dpkg} {pkg}"
     script_path = output_script_file(script)
     cmd = ["/bin/bash", "-c", cmd_str.format(
       editor=script_path,
-      conf_file=conf_file,
+      answers_file=answers_file,
       dpkg="dpkg-reconfigure",
       pkg=pkg
     )]
     result['cmd'] = cmd
 
     try:
-      r = subprocess.check_output(cmd);
+      r = subprocess.check_output(cmd, stderr=file("/dev/null", "w"));
       result['changed'] = True
-    except(CalledProcessError) as err:
+    except(subprocess.CalledProcessError) as err:
       raise InternalException(err.output)
-  
+
   return result;
 
 
 def check_params(params):
-  if not os.path.isfile(params['conf_file']):
-    raise InternalException("No such file; conf_file '" + params['conf_file'] + "'")
+  if not params.has_key("answers_file") or params.has_key("answers"):
+    raise InternalException("Parameters answers_file XOR answers required")
+  if params.has_key("answers_file") and params.has_key("answers"):
+    raise InternalException("Parameters answers_file XOR answers required")
+  if not os.path.isfile(params['answers_file']):
+    raise InternalException("No such file; answers_file '" + params['answers_file'] + "'")
   if subprocess.call(["dpkg", "--status", params['pkg']], stdout=file("/dev/null", "w"), stderr=file("/dev/null", "w")):
     raise InternalException("Package '" + params['pkg'] + "' is not installed.");
 
 
-def check_changed(pkg, conf_file):
+def check_changed(pkg, answers_file):
   return True
-  
+
 
 def output_script_file(script):
   fd, path = tempfile.mkstemp()
